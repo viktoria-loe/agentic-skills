@@ -1,0 +1,143 @@
+# The reusable skills sync. Each factory repository calls it (see the README):
+# it copies skills/ at stable into the repository's .github/skills/, records
+# the release in .github/skills/SKILLS_RELEASE, and opens or updates one pull
+# request on the branch factory/skills-sync. The repository's merge gate merges
+# it after its hold, once it has checked the files are exactly stable.
+#
+# The token is a user token, not the workflow's own: a pull request opened with
+# the workflow token starts no workflows, so the repository's checks would
+# never run on it.
+name: Skills sync
+
+on:
+  workflow_call:
+    inputs:
+      skills-repository:
+        description: The shared skills repository
+        type: string
+        default: viktoria-loe/agentic-skills
+    secrets:
+      token:
+        description: A user token with contents and pull requests write on the calling repository
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: factory/skills-sync
+      BASE: ${{ github.event.repository.default_branch }}
+      SKILLS_REPO: ${{ inputs.skills-repository }}
+      GH_TOKEN: ${{ secrets.token }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          token: ${{ secrets.token }} # to push the sync branch
+
+      - name: Check out the skills at stable
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.skills-repository }}
+          ref: stable
+          path: .skills-stable
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Copy the skills and open or update the pull request
+        run: |
+          release=$(git -C .skills-stable rev-parse HEAD)
+          previous=$(cat .github/skills/SKILLS_RELEASE 2>/dev/null || true)
+          if [ -n "$previous" ] && git -C .skills-stable cat-file -e "$previous^{commit}" 2>/dev/null; then
+            changes=$(git -C .skills-stable log --format='- %h %s' "$previous..$release" -- skills)
+          else
+            changes=$(git -C .skills-stable log -5 --format='- %h %s' "$release" -- skills)
+          fi
+
+          rm -rf .github/skills
+          mkdir -p .github/skills
+          cp -r .skills-stable/skills/. .github/skills/
+          echo "$release" > .github/skills/SKILLS_RELEASE
+          rm -rf .skills-stable
+
+          if [ -z "$(git status --porcelain -- .github/skills)" ]; then
+            echo "Already at $SKILLS_REPO@${release:0:7}; nothing to sync."
+            exit 0
+          fi
+
+          # An open sync pull request at this release stays as it is, so its
+          # review and hold are not restarted every hour.
+          if git fetch --quiet origin "$BRANCH" 2>/dev/null &&
+             [ "$(git show "origin/$BRANCH:.github/skills/SKILLS_RELEASE" 2>/dev/null)" = "$release" ] &&
+             [ -n "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')" ]; then
+            echo "The sync pull request is already at ${release:0:7}."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --quiet -c "$BRANCH"
+          git add -A .github/skills
+          git commit --quiet -m "Sync skills to $SKILLS_REPO@${release:0:7}"
+          git push --quiet --force origin "$BRANCH"
+
+          body=$(cat <<EOF
+          No ticket: the factory's skills sync.
+
+          Copies \`skills/\` from [$SKILLS_REPO@${release:0:7}](https://github.com/$SKILLS_REPO/tree/$release/skills), the commit \`stable\` points to, into \`.github/skills/\`.
+
+          ## Goals
+
+          - [x] \`.github/skills/\` is exactly \`skills/\` at \`stable\` ($release), recorded in \`.github/skills/SKILLS_RELEASE\`
+
+          ## Scope
+
+          - \`.github/skills/\` only
+
+          ## Risks
+
+          Skills change how every agent works. A person approved them by promoting them to \`stable\`; the merge gate checks these files are exactly that commit before it merges.
+
+          ## Rollback
+
+          Promote an earlier commit to \`stable\` in $SKILLS_REPO with allow-rollback; the next sync brings it here.
+
+          ## Decisions
+
+          None.
+
+          ## Evidence
+
+          Changes to \`skills/\` since the last sync (${previous:0:7}):
+
+          ${changes:-- none listed}
+
+          ## Scope added
+
+          None.
+
+          ## Handoff
+
+          Opened by the skills sync. Add the \`hold\` label to stop the automatic merge.
+
+          <!-- factory-notes:start -->
+          <!-- factory-notes:end -->
+          EOF
+          )
+          body=$(printf '%s\n' "$body" | sed 's/^          //')
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --body "$body"
+            echo "Updated #$pr to ${release:0:7}"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$BRANCH" \
+              --title "Sync skills to $SKILLS_REPO@${release:0:7}" --body "$body"
+          fi

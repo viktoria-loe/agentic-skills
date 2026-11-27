@@ -1,0 +1,68 @@
+# Moves stable to a commit on main, after checking its skills. Running this is
+# the person's approval: every factory repository picks stable up within the hour.
+#
+# By default stable only moves forward. To roll back, promote an earlier commit
+# with allow-rollback.
+name: Promote to stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The commit on main to release (default: the newest)
+        required: false
+      allow-rollback:
+        description: Allow moving stable back to an older commit
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # move the stable branch
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find the commit and check it is on main
+        id: target
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          sha=$(git rev-parse --verify "${COMMIT:-HEAD}^{commit}")
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on main"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check the skills at that commit
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          git checkout --quiet "$SHA"
+          node scripts/check-skills.js
+
+      - name: Move stable
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+          ROLLBACK: ${{ inputs.allow-rollback }}
+        run: |
+          if git rev-parse --verify --quiet origin/stable > /dev/null; then
+            if git merge-base --is-ancestor origin/stable "$SHA"; then
+              echo "Moving stable forward to $SHA"
+            elif [ "$ROLLBACK" = "true" ]; then
+              echo "Rolling stable back to $SHA"
+            else
+              echo "::error::$SHA is not ahead of stable; set allow-rollback to move it back"
+              exit 1
+            fi
+          fi
+          git push --force origin "$SHA:refs/heads/stable"
+          echo "stable is now $SHA" >> "$GITHUB_STEP_SUMMARY"

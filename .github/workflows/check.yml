@@ -1,0 +1,21 @@
+# Checks every skill's frontmatter on each pull request and each push to main.
+# Promote to stable runs the same check before it moves stable.
+name: Check skills
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check every skill
+        run: node scripts/check-skills.js
