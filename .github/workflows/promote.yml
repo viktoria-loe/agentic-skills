@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: The commit on main to release (default: the newest)
+        description: "The commit on main to release; empty means the newest"
         required: false
       allow-rollback:
         description: Allow moving stable back to an older commit
